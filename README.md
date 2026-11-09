@@ -2,6 +2,11 @@
 
 > **Zero-API-key lead generation platform** — Discovers businesses, analyzes websites, and scores leads using local tools. No external API keys required.
 
+> Building this in the open — if it saves you time, a star helps others find it.
+> Found a bug, or have an idea? [Open an issue](https://github.com/ziuus/orpaq-ai/issues).
+> New here? Start with a [good first issue](https://github.com/ziuus/orpaq-ai/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+> New lead sources and scoring ideas welcome.
+
 ## What it does
 
 1. **Discovers** businesses from Google Maps (name, phone, website)
