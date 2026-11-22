@@ -20,6 +20,7 @@ export interface Business {
   address?: string;
   rating?: number;
   reviews_count?: number;
+  source?: string;
 }
 
 export interface Analysis {
@@ -27,11 +28,12 @@ export interface Analysis {
   business_id: string;
   screenshot_url?: string;
   pagespeed_score?: number;
-  pagespeed_issues?: string[];
+  pagespeed_issues?: string[] | Record<string, any>;
   mobile_friendly?: boolean;
   ai_ui_score?: number;
   ai_outdated?: boolean;
   ai_issues?: string[];
+  ai_suggestions?: string;
   analysis_status: string;
 }
 
@@ -102,9 +104,34 @@ export const leadsApi = {
     return response.data;
   },
 
-  exportLeads: async (format: 'csv' | 'json', filters?: LeadFilters) => {
-    const response = await api.post('/export', { format, filters });
+  exportLeads: async (format: 'csv' | 'json', filters?: LeadFilters, directDownload: boolean = false) => {
+    if (format === 'csv' && directDownload) {
+      const response = await api.post(
+        '/export',
+        { format, filters, direct_download: true },
+        { responseType: 'blob' }
+      );
+      return response.data;
+    }
+    const response = await api.post('/export', { format, filters, direct_download: false });
     return response.data;
+  },
+
+  downloadLeadsCsv: async (filters?: LeadFilters, filename = 'orpaq-leads.csv') => {
+    const response = await api.post(
+      '/export',
+      { format: 'csv', filters, direct_download: true },
+      { responseType: 'blob' }
+    );
+    const blob = new Blob([response.data], { type: 'text/csv;charset=utf-8;' });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    link.parentNode?.removeChild(link);
+    window.URL.revokeObjectURL(url);
   },
 
   enrichLead: async (id: string) => {

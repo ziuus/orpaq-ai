@@ -19,6 +19,8 @@ async def lifespan(app: FastAPI):
     logger.info("Database initialized")
     yield
     logger.info("Shutting down Orpaq AI...")
+    from app.services.audit_queue import audit_queue
+    await audit_queue.shutdown()
 
 
 app = FastAPI(

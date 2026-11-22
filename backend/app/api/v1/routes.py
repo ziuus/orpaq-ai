@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
-from typing import Optional
+from fastapi.responses import StreamingResponse
+from typing import Optional, Any
 from app.models.schemas import (
     FetchBusinessesRequest,
     AnalyzeWebsiteRequest,
@@ -9,8 +10,12 @@ from app.models.schemas import (
     ExportRequest,
     PipelineRequestCreate,
     DeleteLeadsByFilterRequest,
+    BatchAuditRequest,
+    BatchAuditResponse,
+    BatchAuditStatusResponse,
 )
 from app.services.database import db
+from app.services.audit_queue import audit_queue
 import csv
 import io
 import json
@@ -220,83 +225,204 @@ async def run_pipeline(request: RunPipelineRequest):
     }
 
 
+CSV_EXPORT_HEADERS = [
+    "Business Name",
+    "Website",
+    "Phone",
+    "Email",
+    "Category",
+    "Location",
+    "Address",
+    "Rating",
+    "Reviews Count",
+    "Source",
+    "Lead Score",
+    "Priority",
+    "Outreach Message",
+    "Redesign Suggestions",
+    "PageSpeed Score",
+    "PageSpeed Issues",
+    "Mobile Friendly",
+    "AI UI Score",
+    "Outdated",
+    "AI Issues",
+    "AI Suggestions",
+]
+
+
+def format_lead_csv_row(lead: dict) -> list[str]:
+    b = lead.get("businesses", {}) or {}
+    a = lead.get("analyses", {}) or {}
+
+    def format_bool(val: Optional[bool]) -> str:
+        if val is True:
+            return "Yes"
+        elif val is False:
+            return "No"
+        return ""
+
+    def format_json_field(val: Any) -> str:
+        if val is None:
+            return ""
+        if isinstance(val, (list, dict)):
+            return json.dumps(val, ensure_ascii=False)
+        return str(val)
+
+    return [
+        b.get("name") or "",
+        b.get("website") or "",
+        b.get("phone") or "",
+        b.get("email") or "",
+        b.get("category") or "",
+        b.get("location") or "",
+        b.get("address") or "",
+        str(b.get("rating")) if b.get("rating") is not None else "",
+        str(b.get("reviews_count")) if b.get("reviews_count") is not None else "",
+        b.get("source") or "",
+        str(lead.get("lead_score")) if lead.get("lead_score") is not None else "",
+        lead.get("priority") or "",
+        lead.get("outreach_message") or "",
+        lead.get("redesign_suggestions") or "",
+        str(a.get("pagespeed_score")) if a.get("pagespeed_score") is not None else "",
+        format_json_field(a.get("pagespeed_issues")),
+        format_bool(a.get("mobile_friendly")),
+        str(a.get("ai_ui_score")) if a.get("ai_ui_score") is not None else "",
+        format_bool(a.get("ai_outdated")),
+        format_json_field(a.get("ai_issues")),
+        a.get("ai_suggestions") or "",
+    ]
+
+
+def generate_csv_stream(leads: list[dict]):
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(CSV_EXPORT_HEADERS)
+    yield output.getvalue()
+    output.seek(0)
+    output.truncate(0)
+
+    for lead in leads:
+        writer.writerow(format_lead_csv_row(lead))
+        yield output.getvalue()
+        output.seek(0)
+        output.truncate(0)
+
+
+def _build_db_filters(lead_filters: Optional[LeadFilters]) -> dict:
+    if not lead_filters:
+        return {}
+    filters = {}
+    if lead_filters.priority:
+        filters["priority"] = lead_filters.priority
+    if lead_filters.min_score is not None:
+        filters["min_score"] = lead_filters.min_score
+    if lead_filters.max_score is not None:
+        filters["max_score"] = lead_filters.max_score
+    if lead_filters.has_website is not None:
+        filters["has_website"] = lead_filters.has_website
+    if lead_filters.location:
+        filters["location"] = lead_filters.location
+    if lead_filters.category:
+        filters["category"] = lead_filters.category
+    if lead_filters.search:
+        filters["search"] = lead_filters.search
+    return filters
+
+
 @router.post("/export")
 async def export_leads(request: ExportRequest):
-    filters = {}
-    if request.filters:
-        if request.filters.priority:
-            filters["priority"] = request.filters.priority
-        if request.filters.min_score:
-            filters["min_score"] = request.filters.min_score
-        if request.filters.max_score:
-            filters["max_score"] = request.filters.max_score
-
-    leads = db.get_leads(filters=filters, limit=1000)
-
-    if request.filters:
-        filtered = []
-        for lead in leads:
-            business = lead.get("businesses", {})
-            if (
-                request.filters.location
-                and request.filters.location.lower()
-                not in business.get("location", "").lower()
-            ):
-                continue
-            if (
-                request.filters.category
-                and request.filters.category.lower()
-                != business.get("category", "").lower()
-            ):
-                continue
-            if (
-                request.filters.search
-                and request.filters.search.lower()
-                not in business.get("name", "").lower()
-            ):
-                continue
-            filtered.append(lead)
-        leads = filtered
+    db_filters = _build_db_filters(request.filters)
+    limit = request.limit or 50000
+    leads = db.get_leads(filters=db_filters, limit=limit)
 
     if request.format == "json":
         return {"leads": leads}
 
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(
-        [
-            "Business Name",
-            "Website",
-            "Phone",
-            "Category",
-            "Location",
-            "Lead Score",
-            "Priority",
-            "PageSpeed Score",
-            "AI UI Score",
-            "Outdated",
-        ]
+    if request.direct_download is False:
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(CSV_EXPORT_HEADERS)
+        for lead in leads:
+            writer.writerow(format_lead_csv_row(lead))
+        return {"format": "csv", "data": output.getvalue()}
+
+    return StreamingResponse(
+        generate_csv_stream(leads),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="leads_export.csv"'},
     )
 
-    for lead in leads:
-        business = lead.get("businesses", {})
-        analysis = lead.get("analyses", {})
-        writer.writerow(
-            [
-                business.get("name", ""),
-                business.get("website", ""),
-                business.get("phone", ""),
-                business.get("category", ""),
-                business.get("location", ""),
-                lead.get("lead_score", ""),
-                lead.get("priority", ""),
-                analysis.get("pagespeed_score", ""),
-                analysis.get("ai_ui_score", ""),
-                "Yes" if analysis.get("ai_outdated") else "No",
-            ]
-        )
 
-    return {"format": "csv", "data": output.getvalue()}
+@router.get("/export/csv")
+async def export_leads_csv(
+    priority: Optional[str] = Query(None),
+    min_score: Optional[int] = Query(None),
+    max_score: Optional[int] = Query(None),
+    has_website: Optional[bool] = Query(None),
+    location: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    limit: int = Query(50000, le=100000),
+):
+    filters = {}
+    if priority:
+        filters["priority"] = priority
+    if min_score is not None:
+        filters["min_score"] = min_score
+    if max_score is not None:
+        filters["max_score"] = max_score
+    if has_website is not None:
+        filters["has_website"] = has_website
+    if location:
+        filters["location"] = location
+    if category:
+        filters["category"] = category
+    if search:
+        filters["search"] = search
+
+    leads = db.get_leads(filters=filters, limit=limit)
+    return StreamingResponse(
+        generate_csv_stream(leads),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="leads_export.csv"'},
+    )
+
+
+@router.post("/audit/batch", response_model=BatchAuditResponse, status_code=202)
+async def create_batch_audit(request: BatchAuditRequest):
+    if not request.urls:
+        raise HTTPException(status_code=400, detail="URLs list cannot be empty")
+    if len(request.urls) > 100:
+        raise HTTPException(status_code=400, detail="Batch size exceeds maximum limit of 100 URLs")
+
+    batch_id = audit_queue.enqueue(
+        urls=request.urls,
+        screenshot_only=request.screenshot_only,
+    )
+    batch = audit_queue.get_batch_status(batch_id)
+    return BatchAuditResponse(
+        batch_id=batch_id,
+        status=batch["status"],
+        total_urls=batch["total_urls"],
+        created_at=batch["created_at"],
+        message="Batch audit queued successfully",
+    )
+
+
+@router.get("/audit/batch/{batch_id}", response_model=BatchAuditStatusResponse)
+async def get_batch_audit_status(batch_id: str):
+    batch = audit_queue.get_batch_status(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail=f"Batch audit {batch_id} not found")
+    return BatchAuditStatusResponse(**batch)
+
+
+@router.post("/audit/batch/{batch_id}/cancel")
+async def cancel_batch_audit(batch_id: str):
+    success = audit_queue.cancel_batch(batch_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Batch audit {batch_id} not found")
+    return {"batch_id": batch_id, "status": "cancelled"}
 
 
 @router.delete("/leads/{lead_id}")

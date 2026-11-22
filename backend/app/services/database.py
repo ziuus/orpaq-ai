@@ -26,6 +26,15 @@ class Database:
         self._connection = conn
         self._create_tables()
 
+    def close(self):
+        with self._lock:
+            if self._connection:
+                try:
+                    self._connection.close()
+                except Exception:
+                    pass
+                self._connection = None
+
     @property
     def conn(self) -> sqlite3.Connection:
         assert self._connection is not None, "Database not initialized. Call db.init() first."
@@ -299,13 +308,16 @@ class Database:
                  b.location as b_location, b.address as b_address, b.rating as b_rating,
                  b.reviews_count as b_reviews_count, b.source as b_source,
                  a.id as a_id, a.pagespeed_score as a_pagespeed_score,
+                 a.pagespeed_issues as a_pagespeed_issues,
                  a.mobile_friendly as a_mobile_friendly, a.ai_ui_score as a_ai_ui_score,
                  a.ai_outdated as a_ai_outdated, a.ai_issues as a_ai_issues,
                  a.ai_suggestions as a_ai_suggestions, a.screenshot_url as a_screenshot_url,
                  a.analysis_status as a_analysis_status
                  FROM leads l
                  LEFT JOIN businesses b ON l.business_id = b.id
-                 LEFT JOIN analyses a ON a.business_id = l.business_id
+                 LEFT JOIN analyses a ON a.id = (
+                     SELECT a2.id FROM analyses a2 WHERE a2.business_id = l.business_id ORDER BY a2.created_at DESC LIMIT 1
+                 )
                  WHERE 1=1"""
         params = []
         if filters:
@@ -338,6 +350,15 @@ class Database:
         cur = self.conn.execute(sql, params)
         rows = cur.fetchall()
         enriched = []
+
+        def _safe_json_parse(raw_value):
+            if not raw_value:
+                return None
+            try:
+                return json.loads(raw_value)
+            except Exception:
+                return raw_value
+
         for row in rows:
             d = dict(row)
             enriched.append(
@@ -369,10 +390,11 @@ class Database:
                     "analyses": {
                         "id": d["a_id"],
                         "pagespeed_score": d["a_pagespeed_score"],
+                        "pagespeed_issues": _safe_json_parse(d.get("a_pagespeed_issues")),
                         "mobile_friendly": bool(d["a_mobile_friendly"]) if d.get("a_mobile_friendly") is not None else None,
                         "ai_ui_score": d["a_ai_ui_score"],
                         "ai_outdated": bool(d["a_ai_outdated"]) if d.get("a_ai_outdated") is not None else None,
-                        "ai_issues": json.loads(d["a_ai_issues"]) if d.get("a_ai_issues") else None,
+                        "ai_issues": _safe_json_parse(d.get("a_ai_issues")),
                         "ai_suggestions": d["a_ai_suggestions"],
                         "screenshot_url": d["a_screenshot_url"],
                         "analysis_status": d["a_analysis_status"],
